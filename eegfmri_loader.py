@@ -128,7 +128,26 @@ def discover_recordings(
 
 def load_raw(set_path: str | Path) -> mne.io.Raw:
     """Load a single EEGLAB .set file and configure channel types/montage."""
-    raw = mne.io.read_raw_eeglab(str(set_path), preload=True)
+    try:
+        raw = mne.io.read_raw_eeglab(str(set_path), preload=True)
+    except ValueError as e:
+        if "inhomogeneous" not in str(e):
+            raise
+        # Numpy >= 2.0 can fail on .set files with inconsistent channel
+        # coordinates. Temporarily patch np.atleast_1d to handle this,
+        # since we set our own montage anyway.
+        logger.warning("Retrying load with numpy inhomogeneous-array workaround: %s", set_path)
+        _orig = np.atleast_1d
+        def _safe_atleast_1d(ary):
+            try:
+                return _orig(ary)
+            except ValueError:
+                return np.asarray(ary, dtype=object)
+        np.atleast_1d = _safe_atleast_1d
+        try:
+            raw = mne.io.read_raw_eeglab(str(set_path), preload=True)
+        finally:
+            np.atleast_1d = _orig
 
     # Set channel types: E1-E129 -> eeg, ECG -> ecg
     ch_types = {}
