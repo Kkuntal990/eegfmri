@@ -1,0 +1,13 @@
+[project]
+name = "eegfmri-loader"
+version = "0.1.0"
+description = "EEG-fMRI data loader for braindecode"
+requires-python = ">=3.11"
+dependencies = [
+    "mne>=1.6",
+    "mne-bids>=0.14",
+    "braindecode>=0.8",
+    "numpy",
+    "pandas",
+    "joblib",
+]
