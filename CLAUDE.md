@@ -89,8 +89,9 @@ conda activate eegfmri
 | `scripts/preprocess_eegfmri.sbatch` | EEG MR+BCG artifact removal, resample, braindecode dataset build |
 | `scripts/train_eoec.sbatch` | EEG EO/EC classification (ShallowFBCSPNet, EEGNetv4) |
 | `scripts/validate_eeg.sbatch` | EEG alpha-power Berger + CSP/SVM validation |
-| `scripts/setup_fmri_env.sbatch` | One-shot pip install of `nilearn` + `nibabel` |
-| `scripts/fmri_eoec.sbatch` | fMRI EO/EC classification (within-subject) |
+| `scripts/setup_fmri_env.sbatch` | One-shot pip install of `nilearn` + `nibabel` + `antspyx` |
+| `scripts/fmri_stimloc_mask.sbatch` | Per-subject visual-cortex functional localizer from the stimloc task; produces masks under `results/stimloc_mask/sub-XXX/` |
+| `scripts/fmri_eoec.sbatch` | fMRI EO/EC classification (within-subject). Auto-picks-up `results/stimloc_mask/` for a real V1 ROI classifier. |
 
 When creating a new sbatch, copy one of these as a template. Keep the
 common header (account, partition, log paths, module + conda block) consistent.

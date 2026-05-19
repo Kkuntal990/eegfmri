@@ -31,6 +31,7 @@ import ants
 import nibabel as nib
 import numpy as np
 import pandas as pd
+from nilearn.image import resample_to_img
 from nilearn.maskers import NiftiMasker
 from nilearn.masking import compute_epi_mask
 from sklearn.decomposition import PCA
@@ -99,6 +100,7 @@ def posterior_voxel_indices(mask_img) -> np.ndarray:
     """Bottom 25 % of axial slices inside the brain mask.
 
     Heuristic for occipital cortex without an atlas / MNI registration.
+    Used only when no functional localizer mask is available.
     """
     mask = mask_img.get_fdata().astype(bool)
     z_in_mask = np.where(mask.any(axis=(0, 1)))[0]
@@ -110,6 +112,27 @@ def posterior_voxel_indices(mask_img) -> np.ndarray:
     # NiftiMasker flattens in Fortran (column-major) order; mirror that.
     flat_mask = posterior_mask.flatten(order="F")
     full_mask = mask.flatten(order="F")
+    return np.where(flat_mask[full_mask])[0]
+
+
+def visual_voxel_indices(stimloc_mask_path: Path, brain_mask_img,
+                         target_img) -> np.ndarray:
+    """Indices into NiftiMasker output that fall inside the stimloc mask.
+
+    Resamples the stimloc mask to the target BOLD grid using nearest-neighbour
+    so that subject head-position drift between the stimloc and eoec runs is
+    accommodated within the same session.
+    """
+    stim_img = nib.load(str(stimloc_mask_path))
+    stim_resampled = resample_to_img(
+        stim_img, target_img, interpolation="nearest", force_resample=True,
+        copy_header=True,
+    )
+    stim_mask = stim_resampled.get_fdata().astype(bool)
+    brain_mask = brain_mask_img.get_fdata().astype(bool)
+    visual_in_brain = stim_mask & brain_mask
+    flat_mask = visual_in_brain.flatten(order="F")
+    full_mask = brain_mask.flatten(order="F")
     return np.where(flat_mask[full_mask])[0]
 
 
@@ -201,7 +224,8 @@ def motion_correct(bold_path: Path, n_trs_expected: int):
     return corrected_img, fd, params
 
 
-def run_subject(sub: str, bids_root: Path, out_dir: Path) -> dict:
+def run_subject(sub: str, bids_root: Path, out_dir: Path,
+                stimloc_mask_dir: Path | None = None) -> dict:
     log.info("=" * 60)
     log.info("Subject sub-%s", sub)
     bold_path = bids_root / f"sub-{sub}" / "ses-02" / "func" / \
@@ -267,6 +291,20 @@ def run_subject(sub: str, bids_root: Path, out_dir: Path) -> dict:
     posterior_idx = posterior_voxel_indices(mask_img)
     log.info("  posterior-quartile voxels: %d", len(posterior_idx))
 
+    # Functional-localizer mask from the stimloc task, if available.
+    visual_idx = np.array([], dtype=int)
+    visual_mask_path = None
+    if stimloc_mask_dir is not None:
+        cand = stimloc_mask_dir / f"sub-{sub}" / \
+               f"sub-{sub}_ses-02_stimloc-visual-mask.nii.gz"
+        if cand.exists():
+            visual_mask_path = str(cand)
+            visual_idx = visual_voxel_indices(cand, mask_img, bold_img)
+            log.info("  stimloc-localized visual voxels: %d (from %s)",
+                     len(visual_idx), cand.name)
+        else:
+            log.info("  no stimloc mask at %s -- skipping that classifier", cand)
+
     classifiers = []
     # (a) PCA + LinearSVC on full brain
     classifiers.append(classify(
@@ -281,11 +319,20 @@ def run_subject(sub: str, bids_root: Path, out_dir: Path) -> dict:
         make_pipeline(StandardScaler(with_mean=False),
                       LinearSVC(C=0.01, class_weight="balanced", max_iter=5000)),
     ))
-    # (c) Mean signal across posterior voxels (visual-cortex proxy)
+    # (c) Mean signal across posterior voxels (crude heuristic, no atlas).
     if len(posterior_idx) > 0:
         X_post_mean = ts[:, posterior_idx].mean(axis=1, keepdims=True)[keep]
         classifiers.append(classify(
             X_post_mean, y, groups, "PosteriorMean+LogReg",
+            make_pipeline(StandardScaler(),
+                          LogisticRegression(class_weight="balanced",
+                                             max_iter=5000)),
+        ))
+    # (d) Mean signal across stimloc-localized visual voxels (real V1+ ROI).
+    if len(visual_idx) > 0:
+        X_vis_mean = ts[:, visual_idx].mean(axis=1, keepdims=True)[keep]
+        classifiers.append(classify(
+            X_vis_mean, y, groups, "VisualCortexMean+LogReg",
             make_pipeline(StandardScaler(),
                           LogisticRegression(class_weight="balanced",
                                              max_iter=5000)),
@@ -300,6 +347,8 @@ def run_subject(sub: str, bids_root: Path, out_dir: Path) -> dict:
         "n_blocks": int(len(np.unique(groups))),
         "n_mask_voxels": n_mask_voxels,
         "n_posterior_voxels": int(len(posterior_idx)),
+        "n_visual_voxels": int(len(visual_idx)),
+        "visual_mask_path": visual_mask_path,
         "motion": {
             "fd_mean_mm": float(fd.mean()),
             "fd_max_mm": float(fd.max()),
@@ -319,16 +368,27 @@ def main():
                     type=Path)
     ap.add_argument("--subjects", nargs="*", default=None,
                     help="Restrict to these subject IDs (without 'sub-' prefix)")
+    ap.add_argument("--stimloc-mask-dir",
+                    default="/projects/bbnv/kkokate/eegfmri/results/stimloc_mask",
+                    type=Path,
+                    help="Directory holding per-subject visual-cortex masks. "
+                         "Pass empty string to disable.")
     args = ap.parse_args()
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     subs = args.subjects or discover_subjects(args.bids_root)
     log.info("Subjects: %s", subs)
 
+    mask_dir = args.stimloc_mask_dir if str(args.stimloc_mask_dir) else None
+    if mask_dir is not None and not mask_dir.exists():
+        log.warning("stimloc-mask-dir %s does not exist -- proceeding without",
+                    mask_dir)
+        mask_dir = None
+
     results = {"per_subject": []}
     for sub in subs:
         results["per_subject"].append(run_subject(sub, args.bids_root,
-                                                  args.output_dir))
+                                                  args.output_dir, mask_dir))
 
     out_path = args.output_dir / "fmri_eoec_results.json"
     out_path.write_text(json.dumps(results, indent=2))
