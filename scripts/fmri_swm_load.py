@@ -163,16 +163,23 @@ def extract_eeg_features(raw, trials: list[dict]) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 def extract_fmri_features(bold_img, fd: np.ndarray, trials: list[dict],
-                          v1_mask_img):
-    """Return (X_brain, X_v1, mask_voxel_count).
+                          v1_mask_img, brain_mask_img=None):
+    """Return (X_brain, X_v1, mask_voxel_count, brain_mask_img).
 
     X_brain: (n_trials, n_brain_voxels) — mean BOLD over each trial's
               maintenance window (+ HRF lag), cleaned with motion confounds.
     X_v1:    (n_trials, 1) — mean BOLD over the stimloc V1 mask in the
               same window.
+
+    If `brain_mask_img` is supplied, it's reused (this guarantees the same
+    voxel space across runs of the same subject); otherwise it's computed
+    from this BOLD.
     """
     n_trs = bold_img.shape[3]
-    mask_img = compute_epi_mask(bold_img)
+    if brain_mask_img is None:
+        mask_img = compute_epi_mask(bold_img)
+    else:
+        mask_img = brain_mask_img
 
     fd_d = np.concatenate([[0.0], np.diff(fd)])
     confounds = pd.DataFrame({"fd": fd, "fd_d": fd_d})
@@ -216,7 +223,7 @@ def extract_fmri_features(bold_img, fd: np.ndarray, trials: list[dict],
             X_v1.append(np.array([window[v1_in_brain].mean()]))
         else:
             X_v1.append(np.array([np.nan]))
-    return np.asarray(X_brain), np.asarray(X_v1), n_v1
+    return np.asarray(X_brain), np.asarray(X_v1), n_v1, mask_img
 
 
 # ---------------------------------------------------------------------------
@@ -283,8 +290,11 @@ def run_subject(sub: str, bids_root: Path, out_dir: Path,
         return {"subject": sub,
                 "error": f"missing EEG runs (have: {list(raws_by_run.keys())})"}
 
-    # Per-run feature extraction
+    # Per-run feature extraction. Use a shared brain mask across runs so
+    # cross-run classifier dimensions match (compute_epi_mask is data-driven
+    # and gives slightly different masks per run otherwise).
     per_run = {}
+    shared_brain_mask = None
     for run in RUNS:
         log.info("--- run %s ---", run)
         bold_path = bids_root / f"sub-{sub}" / "ses-02" / "func" / \
@@ -308,9 +318,14 @@ def run_subject(sub: str, bids_root: Path, out_dir: Path,
         bold_img, fd = motion_correct(bold_path, n_trs)
 
         X_eeg = extract_eeg_features(raws_by_run[run], trials)
-        X_brain, X_v1, n_v1 = extract_fmri_features(
+        X_brain, X_v1, n_v1, mask_used = extract_fmri_features(
             bold_img, fd, trials, v1_mask_img,
+            brain_mask_img=shared_brain_mask,
         )
+        if shared_brain_mask is None:
+            shared_brain_mask = mask_used
+            log.info("    using this mask for both runs (n voxels=%d)",
+                     int(mask_used.get_fdata().astype(bool).sum()))
         y = np.asarray([t["load"] for t in trials])
 
         # Drop trials with any NaN feature
