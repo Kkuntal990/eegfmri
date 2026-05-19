@@ -51,9 +51,10 @@ git — see `.gitignore`.
   (env setup, preprocessing, training, validation, model fits, even
   `pip install`) **must** be submitted via `sbatch`.
 - Short read-only checks (`ls`, `cat`, `git status`, `squeue`) are OK on login.
-- Account: `bbnv-delta-gpu`
-- GPU partition: `gpuA40x4` (A40 GPUs; use even for CPU-only jobs to stay
-  inside our allocation, unless we get a CPU account).
+- Account: `bbnv-delta-gpu` (our only allocation — verified via `accounts`)
+- GPU partition: `gpuA40x4`. **Every sbatch must include `--gpus-per-task=1`**
+  even for CPU-only workloads, because the GPU account refuses jobs that
+  request zero GPUs.
 - Log convention: `logs/<jobname>_%j.out` and `logs/<jobname>_%j.err`
 
 ## Environment

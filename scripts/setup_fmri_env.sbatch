@@ -5,6 +5,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
+#SBATCH --gpus-per-task=1
 #SBATCH --mem=8G
 #SBATCH --time=00:20:00
 #SBATCH --output=logs/fmri_env_setup_%j.out
