@@ -26,6 +26,7 @@ import json
 import logging
 from pathlib import Path
 
+import ants
 import nibabel as nib
 import numpy as np
 import pandas as pd
@@ -34,7 +35,6 @@ from nilearn.masking import compute_epi_mask
 from sklearn.decomposition import PCA
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, balanced_accuracy_score, confusion_matrix
-from sklearn.model_selection import GroupKFold
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import LinearSVC
@@ -112,25 +112,42 @@ def posterior_voxel_indices(mask_img) -> np.ndarray:
     return np.where(flat_mask[full_mask])[0]
 
 
+def paired_block_folds(groups: np.ndarray, y: np.ndarray) -> list[tuple[np.ndarray, np.ndarray]]:
+    """3-fold CV pairing consecutive blocks so each test fold has 1 EC + 1 EO.
+
+    Assumes blocks alternate EC, EO, EC, EO, ... For 6 blocks we get 3 folds
+    of (1 EC + 1 EO) test, with the remaining 4 blocks for training.
+    """
+    unique_blocks = sorted(np.unique(groups[groups >= 0]))
+    folds = []
+    for i in range(0, len(unique_blocks) - 1, 2):
+        test_blocks = [unique_blocks[i], unique_blocks[i + 1]]
+        test_mask = np.isin(groups, test_blocks)
+        train_mask = (groups >= 0) & ~test_mask
+        # Sanity: both classes must be present in the test fold
+        if len(np.unique(y[test_mask])) < 2:
+            continue
+        folds.append((np.where(train_mask)[0], np.where(test_mask)[0]))
+    return folds
+
+
 def classify(X: np.ndarray, y: np.ndarray, groups: np.ndarray, name: str,
              pipeline) -> dict:
-    """5-fold GroupKFold CV; groups = block index."""
-    n_groups = len(np.unique(groups))
-    n_splits = min(5, n_groups)
-    if n_splits < 2:
-        return {"name": name, "error": "not enough blocks for CV",
-                "n_groups": int(n_groups)}
-    gkf = GroupKFold(n_splits=n_splits)
+    """Paired-block CV: each fold tests on (1 EC + 1 EO) block, trains on the rest."""
+    folds = paired_block_folds(groups, y)
+    if len(folds) < 2:
+        return {"name": name, "error": "not enough mixed-class fold pairs",
+                "n_folds": len(folds)}
     accs, baccs, cms = [], [], []
-    for fold, (tr, te) in enumerate(gkf.split(X, y, groups=groups)):
-        pipeline.fit(X[tr], y[tr])
-        pred = pipeline.predict(X[te])
-        accs.append(accuracy_score(y[te], pred))
-        baccs.append(balanced_accuracy_score(y[te], pred))
-        cms.append(confusion_matrix(y[te], pred, labels=[0, 1]).tolist())
+    for tr_idx, te_idx in folds:
+        pipeline.fit(X[tr_idx], y[tr_idx])
+        pred = pipeline.predict(X[te_idx])
+        accs.append(accuracy_score(y[te_idx], pred))
+        baccs.append(balanced_accuracy_score(y[te_idx], pred))
+        cms.append(confusion_matrix(y[te_idx], pred, labels=[0, 1]).tolist())
     return {
         "name": name,
-        "n_splits": n_splits,
+        "n_folds": len(folds),
         "accuracy_mean": float(np.mean(accs)),
         "accuracy_std": float(np.std(accs)),
         "balanced_accuracy_mean": float(np.mean(baccs)),
@@ -138,6 +155,40 @@ def classify(X: np.ndarray, y: np.ndarray, groups: np.ndarray, name: str,
         "fold_accuracies": [float(a) for a in accs],
         "fold_confusion_matrices": cms,
     }
+
+
+def motion_correct(bold_img):
+    """Rigid-body motion correction via ANTs.
+
+    Returns:
+        corrected_img:  nibabel Nifti1Image, same shape as input
+        fd:             (T,) framewise displacement
+        params:         (T, 6) per-volume rigid-body parameters
+                        (3 rotations rad, 3 translations mm) or None if
+                        antspyx didn't expose them
+    """
+    log.info("Motion correction (ANTs rigid)")
+    ants_img = ants.from_nibabel(bold_img)
+    mc = ants.motion_correction(ants_img)
+    corrected_img = ants.to_nibabel(mc["motion_corrected"])
+
+    fd = np.asarray(mc.get("FD", []), dtype=float)
+    if fd.size == 0:
+        fd = np.zeros(bold_img.shape[3], dtype=float)
+    log.info("  FD: mean=%.3f mm, max=%.3f mm",
+             float(fd.mean()), float(fd.max()))
+
+    # motion_parameters in modern antspyx is a pandas DataFrame with the
+    # 6 rigid params per volume (3 rotations + 3 translations).
+    params = mc.get("motion_parameters", None)
+    if isinstance(params, pd.DataFrame):
+        params = params.values
+    elif params is not None and hasattr(params, "__len__"):
+        try:
+            params = np.asarray(params, dtype=float)
+        except Exception:
+            params = None
+    return corrected_img, fd, params
 
 
 def run_subject(sub: str, bids_root: Path, out_dir: Path) -> dict:
@@ -160,12 +211,24 @@ def run_subject(sub: str, bids_root: Path, out_dir: Path) -> dict:
     log.info("  shape=%s, zooms=%s", bold_img.shape, bold_img.header.get_zooms())
     n_trs = bold_img.shape[3]
 
+    bold_img, fd, motion_params = motion_correct(bold_img)
+
+    # Build a confound matrix: 6 motion params + FD + their first derivatives.
+    if motion_params is not None and motion_params.shape[0] == n_trs:
+        mp = motion_params
+    else:
+        log.warning("motion_parameters not available — using FD-only confounds")
+        mp = fd.reshape(-1, 1)
+    mp_d = np.vstack([np.zeros((1, mp.shape[1])), np.diff(mp, axis=0)])
+    confounds = np.hstack([mp, mp_d, fd.reshape(-1, 1)])
+    log.info("  confound matrix shape=%s", confounds.shape)
+
     log.info("Computing brain mask")
     mask_img = compute_epi_mask(bold_img)
     n_mask_voxels = int(mask_img.get_fdata().astype(bool).sum())
     log.info("  %d voxels in mask", n_mask_voxels)
 
-    log.info("Masking + cleaning (detrend, z-score, bandpass 0.01-0.10 Hz)")
+    log.info("Masking + cleaning (detrend, z-score, bandpass 0.01-0.10 Hz, regress motion)")
     masker = NiftiMasker(
         mask_img=mask_img,
         standardize="zscore_sample",
@@ -174,7 +237,7 @@ def run_subject(sub: str, bids_root: Path, out_dir: Path) -> dict:
         high_pass=0.01,
         t_r=TR,
     )
-    ts = masker.fit_transform(bold_img)  # (T, n_voxels)
+    ts = masker.fit_transform(bold_img, confounds=confounds)  # (T, n_voxels)
     log.info("  ts shape=%s", ts.shape)
 
     log.info("Parsing block labels")
@@ -227,6 +290,11 @@ def run_subject(sub: str, bids_root: Path, out_dir: Path) -> dict:
         "n_blocks": int(len(np.unique(groups))),
         "n_mask_voxels": n_mask_voxels,
         "n_posterior_voxels": int(len(posterior_idx)),
+        "motion": {
+            "fd_mean_mm": float(fd.mean()),
+            "fd_max_mm": float(fd.max()),
+            "fd_p95_mm": float(np.percentile(fd, 95)),
+        },
         "classifiers": classifiers,
     }
 

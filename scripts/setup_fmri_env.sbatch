@@ -29,9 +29,9 @@ conda activate eegfmri
 
 python -V
 pip install --upgrade pip
-pip install nilearn nibabel
+pip install nilearn nibabel antspyx
 
 echo "--- verifying imports ---"
-python -c "import nilearn, nibabel; print('nilearn', nilearn.__version__); print('nibabel', nibabel.__version__)"
+python -c "import nilearn, nibabel, ants; print('nilearn', nilearn.__version__); print('nibabel', nibabel.__version__); print('ants', ants.__version__)"
 
 echo "Done: job $SLURM_JOB_ID"

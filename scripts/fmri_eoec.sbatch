@@ -7,7 +7,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --gpus-per-task=1
 #SBATCH --mem=32G
-#SBATCH --time=00:30:00
+#SBATCH --time=01:00:00
 #SBATCH --output=logs/fmri_eoec_%j.out
 #SBATCH --error=logs/fmri_eoec_%j.err
 # ---------------------------------------------------------------
