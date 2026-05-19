@@ -43,7 +43,8 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
 
 TR = 1.0
-Z_THRESH = 3.1   # ~ p < 0.001 one-tailed, uncorrected
+Z_THRESH = 2.3   # ~ p < 0.01 one-tailed, uncorrected
+MIN_MASK_VOXELS = 100  # if fewer than this pass threshold, fall back to top 1%
 
 
 def discover_subjects(bids_root: Path) -> list[str]:
@@ -73,15 +74,28 @@ def motion_correct(bold_path: Path, n_trs_expected: int):
 
 
 def build_events_df(events_tsv: Path) -> pd.DataFrame:
-    """Collapse all loc_targ_* trials into a single `stim_on` regressor."""
+    """Collapse all loc_targ_* trials into a single `stim_on` regressor.
+
+    The two subjects' events.tsv files have different schemas:
+      - sub-500: 12 cols, durations in milliseconds (~2000)
+      - sub-1070302: 8 cols, durations in seconds (~2.0)
+    Auto-detect by median magnitude.
+    """
     df = pd.read_csv(events_tsv, sep="\t")
     mask = df["value"].astype(str).str.startswith("loc_targ_")
     events = df[mask].copy()
+    raw_dur = pd.to_numeric(events["duration"], errors="coerce")
+    median_dur = float(raw_dur.median()) if len(raw_dur) else 0.0
+    if median_dur > 50:  # almost certainly milliseconds
+        dur_s = raw_dur / 1000.0
+        log.info("  duration column detected as MILLISECONDS (median=%.1f)", median_dur)
+    else:
+        dur_s = raw_dur
+        log.info("  duration column detected as SECONDS (median=%.2f)", median_dur)
     out = pd.DataFrame({
         # Use onset relative to MRI start (column already in seconds).
         "onset": pd.to_numeric(events["onsetRelToMRIstart"], errors="coerce"),
-        # Duration in events.tsv is in ms; convert to seconds.
-        "duration": pd.to_numeric(events["duration"], errors="coerce") / 1000.0,
+        "duration": dur_s,
         "trial_type": "stim_on",
     }).dropna()
     return out.reset_index(drop=True)
@@ -140,8 +154,9 @@ def localize_subject(sub: str, bids_root: Path, out_dir: Path) -> dict:
     log.info("  visual mask voxels (z > %.1f): %d (%.1f%% of brain)",
              Z_THRESH, n_voxels, 100.0 * n_voxels / max(n_brain, 1))
 
-    if n_voxels == 0:
-        log.warning("  EMPTY visual mask at z>%.1f -- falling back to top-1%% z", Z_THRESH)
+    if n_voxels < MIN_MASK_VOXELS:
+        log.warning("  only %d voxels at z>%.1f (<%d) -- falling back to top-1%% z",
+                    n_voxels, Z_THRESH, MIN_MASK_VOXELS)
         top_n = max(int(0.01 * n_brain), 100)
         flat = z_data * mask_img.get_fdata().astype(np.uint8)
         cutoff = np.partition(flat.ravel(), -top_n)[-top_n]
