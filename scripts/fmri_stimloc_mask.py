@@ -28,16 +28,18 @@ Usage:
 import argparse
 import json
 import logging
-import tempfile
+import sys
 from pathlib import Path
 
-import ants
 import nibabel as nib
 import numpy as np
 import pandas as pd
 from nilearn.glm.first_level import FirstLevelModel
 from nilearn.image import new_img_like
 from nilearn.masking import compute_epi_mask
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _cache import get_motion_corrected_bold  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
@@ -56,21 +58,14 @@ def discover_subjects(bids_root: Path) -> list[str]:
     return subs
 
 
-def motion_correct(bold_path: Path, n_trs_expected: int):
-    """Rigid-body motion correction via ANTs. Returns (nibabel img, FD)."""
-    log.info("Motion correction (ANTs rigid)")
-    ants_img = ants.image_read(str(bold_path))
-    mc = ants.motion_correction(ants_img)
-    with tempfile.NamedTemporaryFile(suffix=".nii.gz", delete=False) as f:
-        tmp_path = f.name
-    ants.image_write(mc["motion_corrected"], tmp_path)
-    corrected_img = nib.load(tmp_path)
-    fd = np.asarray(mc.get("FD", []), dtype=float)
-    if fd.size == 0:
-        fd = np.zeros(n_trs_expected, dtype=float)
-    log.info("  FD: mean=%.3f mm, max=%.3f mm",
-             float(fd.mean()), float(fd.max()))
-    return corrected_img, fd
+def motion_correct(bold_path: Path, sub: str, n_trs_expected: int):
+    """Disk-cached ANTs motion correction. Returns (nibabel img, FD)."""
+    bold_img, fd = get_motion_corrected_bold(
+        bold_path, sub, ses="02", task="stimloc",
+    )
+    if len(fd) < n_trs_expected:
+        fd = np.concatenate([fd, np.zeros(n_trs_expected - len(fd))])
+    return bold_img, fd
 
 
 def build_events_df(events_tsv: Path) -> pd.DataFrame:
@@ -117,7 +112,7 @@ def localize_subject(sub: str, bids_root: Path, out_dir: Path) -> dict:
     n_trs = bold_img.shape[3]
     log.info("  BOLD shape=%s", bold_img.shape)
 
-    bold_img, fd = motion_correct(bold_path, n_trs)
+    bold_img, fd = motion_correct(bold_path, sub, n_trs)
 
     events = build_events_df(events_path)
     log.info("  %d stim_on trials, mean duration %.2fs",

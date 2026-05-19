@@ -22,10 +22,13 @@ build/
 # Heavy outputs (live on Delta, not in git)
 logs/
 results/
+derivatives/
 *.nii.gz
 *.set
 *.fdt
 *.pt
+*.fif
+*.npy
 
 # OS / IDE noise
 .DS_Store

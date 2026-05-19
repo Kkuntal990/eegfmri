@@ -36,14 +36,12 @@ import argparse
 import json
 import logging
 import sys
-import tempfile
 from pathlib import Path
 
-import ants
 import nibabel as nib
 import numpy as np
 import pandas as pd
-from nilearn.image import new_img_like, resample_to_img
+from nilearn.image import resample_to_img
 from nilearn.maskers import NiftiMasker
 from nilearn.masking import compute_epi_mask
 from scipy.signal import hilbert
@@ -53,8 +51,8 @@ from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import LinearSVC
 
-sys.path.insert(0, "/projects/bbnv/kkokate/eegfmri")
-from eegfmri_loader import load_dataset  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _cache import get_cleaned_eeg_for_task, get_motion_corrected_bold  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
@@ -66,26 +64,6 @@ RUNS = ["1", "2"]
 
 FRONTAL_CHS = ["E11", "E12", "E5", "E6"]   # frontal-midline theta cluster
 POSTERIOR_CHS = ["E62", "E67", "E70", "E72", "E75", "E76", "E83", "E84"]
-
-
-# ---------------------------------------------------------------------------
-# Motion correction (same routine as fmri_eoec.py)
-# ---------------------------------------------------------------------------
-
-def motion_correct(bold_path: Path, n_trs_expected: int):
-    log.info("  motion correction (ANTs rigid)")
-    ants_img = ants.image_read(str(bold_path))
-    mc = ants.motion_correction(ants_img)
-    with tempfile.NamedTemporaryFile(suffix=".nii.gz", delete=False) as f:
-        tmp_path = f.name
-    ants.image_write(mc["motion_corrected"], tmp_path)
-    corrected_img = nib.load(tmp_path)
-    fd = np.asarray(mc.get("FD", []), dtype=float)
-    if fd.size == 0:
-        fd = np.zeros(n_trs_expected, dtype=float)
-    log.info("    FD: mean=%.3f mm, max=%.3f mm",
-             float(fd.mean()), float(fd.max()))
-    return corrected_img, fd
 
 
 # ---------------------------------------------------------------------------
@@ -272,20 +250,13 @@ def run_subject(sub: str, bids_root: Path, out_dir: Path,
     v1_mask_img = nib.load(str(v1_mask_path))
     log.info("V1 mask path: %s", v1_mask_path.name)
 
-    # Load EEG once across both runs via eegfmri_loader.
-    log.info("Loading cleaned EEG (sub-%s, swm_run-1 + swm_run-2)", sub)
-    eeg_ds = load_dataset(
-        bids_root, subjects=[sub], sessions=["02"],
-        tasks=["swm"], preprocess=True, resample_freq=250.0,
-        pick_eeg_only=True, mr_artifact_removal=True,
-        bcg_artifact_removal=True, n_jobs=1,
+    # Load EEG once across both runs (cached as .fif after first run).
+    log.info("Loading cleaned EEG (sub-%s, swm)", sub)
+    raws_by_run_raw = get_cleaned_eeg_for_task(
+        bids_root, sub, ses="02", task="swm",
     )
-    raws_by_run = {}
-    for ds in eeg_ds.datasets:
-        rid = ds.description.get("run")
-        if rid is None:
-            continue
-        raws_by_run[str(rid)] = ds.raw
+    # Normalise keys to strings (the cache may return None for single-run tasks).
+    raws_by_run = {str(k): v for k, v in raws_by_run_raw.items() if k is not None}
     if set(raws_by_run.keys()) != set(RUNS):
         return {"subject": sub,
                 "error": f"missing EEG runs (have: {list(raws_by_run.keys())})"}
@@ -312,10 +283,12 @@ def run_subject(sub: str, bids_root: Path, out_dir: Path,
         if min(n1, n5) < 3:
             return {"subject": sub, "error": f"too few trials in run-{run}"}
 
-        bold_img = nib.load(str(bold_path))
+        bold_img, fd = get_motion_corrected_bold(
+            bold_path, sub, ses="02", task="swm", run=run,
+        )
         n_trs = bold_img.shape[3]
-        log.info("  BOLD shape=%s", bold_img.shape)
-        bold_img, fd = motion_correct(bold_path, n_trs)
+        log.info("  BOLD shape=%s, FD mean=%.3f mm", bold_img.shape,
+                 float(fd.mean()))
 
         X_eeg = extract_eeg_features(raws_by_run[run], trials)
         X_brain, X_v1, n_v1, mask_used = extract_fmri_features(

@@ -83,6 +83,7 @@ conda activate eegfmri
 | `fmri_eoec.sbatch` | fMRI EO/EC within-subject classifier; uses stimloc V1 |
 | `fmri_eeg_alpha_glm.sbatch` | Alpha-BOLD coupling GLM on rest task |
 | `fmri_swm_load.sbatch` | Sternberg WM load1-vs-load5 within-subject classifier (cross-modal, leave-one-run-out) |
+| `scripts/_cache.py` | Disk-cache helpers for cleaned EEG (.fif) and motion-corrected BOLD (.nii.gz + .npy) under `derivatives/cache/`. Every fMRI script uses these so reruns skip the ~12 min of MR+BCG+motion preprocessing. Delete `derivatives/cache/` to force a rebuild. |
 
 ## Software stack on Delta
 

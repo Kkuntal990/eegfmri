@@ -24,10 +24,9 @@ Usage:
 import argparse
 import json
 import logging
-import tempfile
+import sys
 from pathlib import Path
 
-import ants
 import nibabel as nib
 import numpy as np
 import pandas as pd
@@ -35,6 +34,9 @@ from nilearn.image import resample_to_img
 from nilearn.maskers import NiftiMasker
 from nilearn.masking import compute_epi_mask
 from sklearn.decomposition import PCA
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _cache import get_motion_corrected_bold  # noqa: E402
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, balanced_accuracy_score, confusion_matrix
 from sklearn.pipeline import make_pipeline
@@ -181,47 +183,19 @@ def classify(X: np.ndarray, y: np.ndarray, groups: np.ndarray, name: str,
     }
 
 
-def motion_correct(bold_path: Path, n_trs_expected: int):
-    """Rigid-body motion correction via ANTs.
+def motion_correct(bold_path: Path, sub: str, n_trs_expected: int):
+    """Disk-cached ANTs motion correction. Returns (img, fd, motion_params).
 
-    Loads the NIfTI directly with antspyx (avoids the nibabel<->ants
-    converter, which is API-unstable across versions), runs
-    ants.motion_correction, then writes the corrected image to a temp
-    file and reloads with nibabel for downstream nilearn use.
-
-    Returns:
-        corrected_img:  nibabel Nifti1Image
-        fd:             (T,) framewise displacement (mm)
-        params:         (T, k) per-volume rigid-body parameters or None
+    motion_params is always None here because the cache stores only the
+    corrected image + FD; if you need the 6-rigid-DoF parameters, run
+    ANTs directly via scripts/_cache.py and extend the cache layer.
     """
-    log.info("Motion correction (ANTs rigid)")
-    ants_img = ants.image_read(str(bold_path))
-    mc = ants.motion_correction(ants_img)
-
-    with tempfile.NamedTemporaryFile(suffix=".nii.gz", delete=False) as f:
-        tmp_path = f.name
-    ants.image_write(mc["motion_corrected"], tmp_path)
-    corrected_img = nib.load(tmp_path)
-
-    fd = np.asarray(mc.get("FD", []), dtype=float)
-    if fd.size == 0:
-        fd = np.zeros(n_trs_expected, dtype=float)
-    log.info("  FD: mean=%.3f mm, max=%.3f mm",
-             float(fd.mean()), float(fd.max()))
-
-    # motion_parameters: format varies by antspyx version. Try to coerce
-    # to a (T, k) float array; fall back to None.
-    params = mc.get("motion_parameters", None)
-    if isinstance(params, pd.DataFrame):
-        params = params.select_dtypes(include=[np.number]).values
-    elif params is not None:
-        try:
-            params = np.asarray(params, dtype=float)
-            if params.ndim == 1:
-                params = params.reshape(-1, 1)
-        except Exception:
-            params = None
-    return corrected_img, fd, params
+    bold_img, fd = get_motion_corrected_bold(
+        bold_path, sub, ses="02", task="eoec",
+    )
+    if len(fd) < n_trs_expected:
+        fd = np.concatenate([fd, np.zeros(n_trs_expected - len(fd))])
+    return bold_img, fd, None
 
 
 def run_subject(sub: str, bids_root: Path, out_dir: Path,
@@ -245,7 +219,7 @@ def run_subject(sub: str, bids_root: Path, out_dir: Path,
     log.info("  shape=%s, zooms=%s", bold_img.shape, bold_img.header.get_zooms())
     n_trs = bold_img.shape[3]
 
-    bold_img, fd, motion_params = motion_correct(bold_path, n_trs)
+    bold_img, fd, motion_params = motion_correct(bold_path, sub, n_trs)
 
     # Build a confound matrix: 6 motion params + FD + their first derivatives.
     if motion_params is not None and motion_params.shape[0] == n_trs:

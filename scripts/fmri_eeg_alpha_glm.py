@@ -29,10 +29,8 @@ import argparse
 import json
 import logging
 import sys
-import tempfile
 from pathlib import Path
 
-import ants
 import nibabel as nib
 import numpy as np
 import pandas as pd
@@ -45,9 +43,8 @@ from nilearn.image import new_img_like, resample_to_img
 from nilearn.masking import compute_epi_mask
 from scipy.signal import hilbert
 
-# Allow `from eegfmri_loader import ...` when running from the repo root.
-sys.path.insert(0, "/projects/bbnv/kkokate/eegfmri")
-from eegfmri_loader import load_dataset  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _cache import get_cleaned_eeg_for_task, get_motion_corrected_bold  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
@@ -60,41 +57,15 @@ SMOOTH_WIN_S = 5.0
 OCCIPITAL_CHS = ["E62", "E67", "E70", "E72", "E75", "E76", "E83", "E84"]
 
 
-def motion_correct(bold_path: Path, n_trs_expected: int):
-    """Rigid-body motion correction via ANTs. Returns (nibabel img, FD)."""
-    log.info("Motion correction (ANTs rigid)")
-    ants_img = ants.image_read(str(bold_path))
-    mc = ants.motion_correction(ants_img)
-    with tempfile.NamedTemporaryFile(suffix=".nii.gz", delete=False) as f:
-        tmp_path = f.name
-    ants.image_write(mc["motion_corrected"], tmp_path)
-    corrected_img = nib.load(tmp_path)
-    fd = np.asarray(mc.get("FD", []), dtype=float)
-    if fd.size == 0:
-        fd = np.zeros(n_trs_expected, dtype=float)
-    log.info("  FD: mean=%.3f mm, max=%.3f mm",
-             float(fd.mean()), float(fd.max()))
-    return corrected_img, fd
-
-
 def load_rest_eeg(bids_root: Path, sub: str):
-    """Load the cleaned (MR + BCG removed) ses-02 rest EEG via the BIDS loader."""
+    """Load the cleaned (MR + BCG removed) ses-02 rest EEG via the disk cache."""
     log.info("Loading cleaned EEG (sub-%s, rest)", sub)
-    dataset = load_dataset(
-        bids_root,
-        subjects=[sub],
-        sessions=["02"],
-        tasks=["rest"],
-        preprocess=True,
-        resample_freq=250.0,
-        pick_eeg_only=True,
-        mr_artifact_removal=True,
-        bcg_artifact_removal=True,
-        n_jobs=1,
-    )
-    if len(dataset.datasets) == 0:
+    raws_by_run = get_cleaned_eeg_for_task(bids_root, sub, ses="02", task="rest")
+    if not raws_by_run:
         return None
-    return dataset.datasets[0].raw
+    # rest is single-run; the cache returns {None: raw} for tasks without
+    # a run suffix, but the first value either way is what we want.
+    return next(iter(raws_by_run.values()))
 
 
 def occipital_alpha_envelope(raw, target_tr_s: float = TR) -> np.ndarray:
@@ -180,10 +151,12 @@ def run_subject(sub: str, bids_root: Path, out_dir: Path,
         log.warning("  missing rest BOLD")
         return {"subject": sub, "error": "missing rest BOLD"}
 
-    bold_img = nib.load(str(bold_path))
+    bold_img, fd = get_motion_corrected_bold(
+        bold_path, sub, ses="02", task="rest",
+    )
     n_trs = bold_img.shape[3]
-    log.info("  BOLD shape=%s", bold_img.shape)
-    bold_img, fd = motion_correct(bold_path, n_trs)
+    log.info("  BOLD shape=%s, FD mean=%.3f mm", bold_img.shape,
+             float(fd.mean()))
 
     raw = load_rest_eeg(bids_root, sub)
     if raw is None:
