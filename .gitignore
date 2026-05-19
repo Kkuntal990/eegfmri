@@ -18,3 +18,15 @@ build/
 # Environment
 .env
 *.egg
+
+# Heavy outputs (live on Delta, not in git)
+logs/
+results/
+*.nii.gz
+*.set
+*.fdt
+*.pt
+
+# OS / IDE noise
+.DS_Store
+*.pdf
