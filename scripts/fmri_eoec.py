@@ -24,6 +24,7 @@ Usage:
 import argparse
 import json
 import logging
+import tempfile
 from pathlib import Path
 
 import ants
@@ -157,35 +158,44 @@ def classify(X: np.ndarray, y: np.ndarray, groups: np.ndarray, name: str,
     }
 
 
-def motion_correct(bold_img):
+def motion_correct(bold_path: Path, n_trs_expected: int):
     """Rigid-body motion correction via ANTs.
 
+    Loads the NIfTI directly with antspyx (avoids the nibabel<->ants
+    converter, which is API-unstable across versions), runs
+    ants.motion_correction, then writes the corrected image to a temp
+    file and reloads with nibabel for downstream nilearn use.
+
     Returns:
-        corrected_img:  nibabel Nifti1Image, same shape as input
-        fd:             (T,) framewise displacement
-        params:         (T, 6) per-volume rigid-body parameters
-                        (3 rotations rad, 3 translations mm) or None if
-                        antspyx didn't expose them
+        corrected_img:  nibabel Nifti1Image
+        fd:             (T,) framewise displacement (mm)
+        params:         (T, k) per-volume rigid-body parameters or None
     """
     log.info("Motion correction (ANTs rigid)")
-    ants_img = ants.from_nibabel(bold_img)
+    ants_img = ants.image_read(str(bold_path))
     mc = ants.motion_correction(ants_img)
-    corrected_img = ants.to_nibabel(mc["motion_corrected"])
+
+    with tempfile.NamedTemporaryFile(suffix=".nii.gz", delete=False) as f:
+        tmp_path = f.name
+    ants.image_write(mc["motion_corrected"], tmp_path)
+    corrected_img = nib.load(tmp_path)
 
     fd = np.asarray(mc.get("FD", []), dtype=float)
     if fd.size == 0:
-        fd = np.zeros(bold_img.shape[3], dtype=float)
+        fd = np.zeros(n_trs_expected, dtype=float)
     log.info("  FD: mean=%.3f mm, max=%.3f mm",
              float(fd.mean()), float(fd.max()))
 
-    # motion_parameters in modern antspyx is a pandas DataFrame with the
-    # 6 rigid params per volume (3 rotations + 3 translations).
+    # motion_parameters: format varies by antspyx version. Try to coerce
+    # to a (T, k) float array; fall back to None.
     params = mc.get("motion_parameters", None)
     if isinstance(params, pd.DataFrame):
-        params = params.values
-    elif params is not None and hasattr(params, "__len__"):
+        params = params.select_dtypes(include=[np.number]).values
+    elif params is not None:
         try:
             params = np.asarray(params, dtype=float)
+            if params.ndim == 1:
+                params = params.reshape(-1, 1)
         except Exception:
             params = None
     return corrected_img, fd, params
@@ -211,7 +221,7 @@ def run_subject(sub: str, bids_root: Path, out_dir: Path) -> dict:
     log.info("  shape=%s, zooms=%s", bold_img.shape, bold_img.header.get_zooms())
     n_trs = bold_img.shape[3]
 
-    bold_img, fd, motion_params = motion_correct(bold_img)
+    bold_img, fd, motion_params = motion_correct(bold_path, n_trs)
 
     # Build a confound matrix: 6 motion params + FD + their first derivatives.
     if motion_params is not None and motion_params.shape[0] == n_trs:
