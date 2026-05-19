@@ -82,6 +82,7 @@ conda activate eegfmri
 | `fmri_stimloc_mask.sbatch` | Per-subject functional V1 localizer (stimloc) |
 | `fmri_eoec.sbatch` | fMRI EO/EC within-subject classifier; uses stimloc V1 |
 | `fmri_eeg_alpha_glm.sbatch` | Alpha-BOLD coupling GLM on rest task |
+| `fmri_swm_load.sbatch` | Sternberg WM load1-vs-load5 within-subject classifier (cross-modal, leave-one-run-out) |
 
 ## Software stack on Delta
 
