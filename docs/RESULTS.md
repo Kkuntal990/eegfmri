@@ -57,8 +57,34 @@ positive control for the alpha-BOLD coupling experiment.
 
 ## fMRI alpha-BOLD GLM (rest task)
 
-Pending — `scripts/fmri_eeg_alpha_glm.sbatch`. Expected: negative z inside the
-V1 mask (canonical coupling — high alpha = low BOLD) for sub-500;
-attenuated / positive z for sub-1070302 (matches drowsiness hypothesis).
+From `results/fmri_alpha_bold/alpha_bold_results.json`. Per-subject GLM with
+occipital alpha envelope (8-12 Hz Hilbert, smooth 5 s, downsampled to TR,
+z-scored, HRF-convolved with Glover) as the single parametric regressor;
+motion + cosine drift as nuisance regressors; 6 mm smoothing. Threshold and
+ROI stats restricted to each subject's stimloc-derived V1 mask.
 
-Output will go to `results/fmri_alpha_bold/alpha_bold_results.json`.
+| Subject | TRs | FD mean | V1 voxels | mean z[V1] | median z[V1] | % neg in V1 | z-map range |
+|---|---:|---:|---:|---:|---:|---:|---|
+| sub-500 | 360 | 0.118 mm | 197 | **-1.107** | -1.123 | **85.8 %** | [-5.05, 2.31] |
+| sub-1070302 | 360 | 0.159 mm | 3559 | -0.078 | -0.050 | 52.4 % | [-4.79, 4.48] |
+
+Interpretation:
+- sub-500 shows the **canonical Goldman 2002 / Ingram 2024 negative alpha-BOLD
+  coupling** in visual cortex — high alpha goes with low BOLD. 86 % of V1
+  voxels are negative; the signal is unambiguous despite the small 197-voxel
+  mask.
+- sub-1070302 shows **essentially no alpha-BOLD coupling** in V1 (52 % negative
+  = chance). Same subject that already showed EOEC reversal in both EEG and
+  fMRI; rest now adds the third independent signal.
+
+The three-signal cross-task pattern for sub-1070302:
+1. EEG EOEC: occipital alpha reversed (EC < EO)
+2. fMRI EOEC: visual-cortex BOLD reversed (EC > EO)
+3. **Rest alpha-BOLD: coupling absent**
+
+Most likely interpretation: drowsiness / sleep onset state during scanning
+disrupts the normal alpha-vigilance / V1-engagement relationship. The
+coupling test on the 6-min rest run is the highest-power version of the
+effect (360 TRs vs 150 in EOEC).
+
+Z-maps saved at `results/fmri_alpha_bold/sub-XXX/sub-XXX_alpha-bold-zmap.nii.gz`.
