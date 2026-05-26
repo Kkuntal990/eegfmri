@@ -93,7 +93,8 @@ def parse_swm_trials(events_tsv: Path) -> pd.DataFrame:
     targ["accuracy"] = pd.to_numeric(targ.get("accuracy"), errors="coerce")
     rt_col = next((c for c in ("reactionTime", "response_time", "RT")
                    if c in targ.columns), None)
-    targ["rt"] = (pd.to_numeric(targ[rt_col], errors="coerce") / 1000.0
+    # reactionTime is already in seconds in this dataset (typical values 0.5-1.5).
+    targ["rt"] = (pd.to_numeric(targ[rt_col], errors="coerce")
                   if rt_col else np.nan)
     targ["maint_s"] = pd.to_numeric(targ.get("maintDuration"), errors="coerce")
     keep = ["onset_s", "load", "accuracy", "rt", "maint_s"]
