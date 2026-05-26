@@ -108,22 +108,30 @@ def compute_iaf(raw, chs: list[str]) -> dict:
     raw_peak_idx = int(np.argmax(band_raw_power))
     raw_peak_iaf = float(band_freqs[raw_peak_idx])
 
-    # Primary IAF estimate: use centre-of-mass when the periodic-residual
-    # peak still pins at the search-range boundary (a sign the spectrum is
-    # monotonically decreasing through alpha and argmax is unreliable).
-    # See Corcoran et al. 2018 Psychophysiology -- CoM is the standard
-    # fallback when peak detection is degenerate. Otherwise prefer the peak.
-    boundary_pin = (
-        iaf_peak == band_freqs[0] or iaf_peak == band_freqs[-1]
+    # Primary IAF estimate: use centre-of-mass when peak detection is
+    # degenerate. Two degeneracy conditions matter:
+    #   (a) The 1/f-corrected periodic peak equals the raw-PSD peak, i.e.
+    #       the 1/f correction didn't move the peak -- the spectrum is
+    #       monotonically decreasing through alpha.
+    #   (b) The peak is within one frequency bin of either search-range
+    #       boundary (a softer version of "pinned").
+    # Either case means argmax is unreliable; fall back to centre-of-mass
+    # per Corcoran et al. 2018 Psychophysiology.
+    bin_step = float(band_freqs[1] - band_freqs[0]) if len(band_freqs) > 1 else 0.5
+    near_boundary = (
+        abs(iaf_peak - band_freqs[0]) <= bin_step
+        or abs(iaf_peak - band_freqs[-1]) <= bin_step
     )
-    primary_iaf = com if boundary_pin else iaf_peak
+    peak_unchanged_by_1f = (iaf_peak == raw_peak_iaf)
+    degenerate_peak = near_boundary or peak_unchanged_by_1f
+    primary_iaf = com if degenerate_peak else iaf_peak
 
     return {
         "iaf_hz": float(primary_iaf),          # primary IAF estimate
         "iaf_peak_hz": iaf_peak,               # 1/f-corrected peak (raw argmax of residual)
         "iaf_com_hz": com,                     # 1/f-corrected centre-of-mass
         "iaf_raw_peak_hz": raw_peak_iaf,       # diagnostic: pre-1/f peak
-        "boundary_pin_fallback_to_com": bool(boundary_pin),
+        "degenerate_peak_fallback_to_com": bool(degenerate_peak),
         "peak_periodic_power": float(band_periodic[peak_idx]),
         "aperiodic_slope": float(slope),
         "channels_used": picks,
