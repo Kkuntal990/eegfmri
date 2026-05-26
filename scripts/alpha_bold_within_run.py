@@ -98,12 +98,10 @@ def load_swm_trials(events_tsv: Path) -> pd.DataFrame:
     if targ.empty:
         return targ
     targ["onset_s"] = pd.to_numeric(targ["onsetRelToMRIstart"], errors="coerce")
-    if "RT" in targ.columns:
-        targ["rt"] = pd.to_numeric(targ["RT"], errors="coerce")
-    elif "responseTime" in targ.columns:
-        targ["rt"] = pd.to_numeric(targ["responseTime"], errors="coerce")
-    else:
-        targ["rt"] = np.nan
+    rt_col = next((c for c in ("reactionTime", "response_time", "RT", "responseTime")
+                   if c in targ.columns), None)
+    targ["rt"] = (pd.to_numeric(targ[rt_col], errors="coerce")
+                  if rt_col else np.nan)
     if "accuracy" in targ.columns:
         targ["acc"] = pd.to_numeric(targ["accuracy"], errors="coerce")
     else:
