@@ -66,30 +66,55 @@ WIN_ENCODE = (0.0, 2.0)
 
 
 def compute_iaf(raw, chs: list[str]) -> dict:
-    """Find Individual Alpha Frequency by Welch PSD peak in 7-13 Hz over posterior chs."""
+    """Find Individual Alpha Frequency after removing 1/f aperiodic component.
+
+    Per Corcoran et al. 2018 / FOOOF tradition: a raw PSD peak in 7-13 Hz
+    is dominated by the 1/f slope (highest power is at lowest frequency),
+    so we first fit log(PSD) ~ log(freq) on the aperiodic background
+    (2-50 Hz, excluding 7-13 Hz), subtract it, then find the peak in the
+    periodic residual. This addresses the FOOOF / aperiodic-1/f confound
+    (Donoghue 2020, Waschke 2021).
+    """
     picks = [c for c in chs if c in raw.ch_names]
     if not picks:
         raise ValueError("no posterior channels in raw")
     raw_p = raw.copy().pick(picks)
     data = raw_p.get_data()
     sfreq = raw_p.info["sfreq"]
-    # Welch's PSD per channel, average across channels.
     freqs, psd = welch(data, fs=sfreq, nperseg=int(sfreq * 4),
                        noverlap=int(sfreq * 2), axis=1)
     psd_mean = psd.mean(axis=0)
-    band_mask = (freqs >= IAF_SEARCH_BAND[0]) & (freqs <= IAF_SEARCH_BAND[1])
-    band_freqs = freqs[band_mask]
-    band_power = psd_mean[band_mask]
-    if not len(band_power):
-        return {"iaf_hz": np.nan}
-    peak_idx = int(np.argmax(band_power))
+
+    valid = (freqs > 1) & (freqs < 50)
+    f_v = freqs[valid]
+    p_v = psd_mean[valid]
+    log_f = np.log10(f_v)
+    log_p = np.log10(p_v + 1e-20)
+    alpha_mask = (f_v >= IAF_SEARCH_BAND[0]) & (f_v <= IAF_SEARCH_BAND[1])
+    fit_mask = ~alpha_mask  # fit 1/f on everything except the alpha band
+    slope, intercept = np.polyfit(log_f[fit_mask], log_p[fit_mask], 1)
+    aperiodic_log = slope * log_f + intercept
+    # Periodic residual in linear power units; clip negatives at 0.
+    periodic = np.clip(p_v - 10 ** aperiodic_log, 0.0, None)
+
+    band_freqs = f_v[alpha_mask]
+    band_periodic = periodic[alpha_mask]
+    band_raw_power = p_v[alpha_mask]
+    if not len(band_periodic) or band_periodic.sum() == 0:
+        return {"iaf_hz": float("nan"), "channels_used": picks}
+    peak_idx = int(np.argmax(band_periodic))
     iaf = float(band_freqs[peak_idx])
-    # Centre-of-mass estimate as a robustness check.
-    com = float((band_freqs * band_power).sum() / band_power.sum())
+    com = float((band_freqs * band_periodic).sum() / band_periodic.sum())
+    # Also return the raw-PSD peak for diagnostic (this was the buggy
+    # value before the 1/f correction was added).
+    raw_peak_idx = int(np.argmax(band_raw_power))
+    raw_peak_iaf = float(band_freqs[raw_peak_idx])
     return {
-        "iaf_hz": iaf,
-        "iaf_com_hz": com,
-        "peak_power": float(band_power[peak_idx]),
+        "iaf_hz": iaf,                         # 1/f-corrected peak (primary)
+        "iaf_com_hz": com,                     # 1/f-corrected centre-of-mass
+        "iaf_raw_peak_hz": raw_peak_iaf,       # diagnostic: pre-correction peak
+        "peak_periodic_power": float(band_periodic[peak_idx]),
+        "aperiodic_slope": float(slope),
         "channels_used": picks,
     }
 
@@ -278,16 +303,18 @@ def main():
     # ------------------------------------------------------------------
     # Print: IAFs, IAF-band lag matrix, side-by-side comparison
     # ------------------------------------------------------------------
-    print("\n" + "=" * 80)
-    print("INDIVIDUAL ALPHA FREQUENCY (Welch peak in 7-13 Hz over posterior channels)")
-    print("=" * 80)
+    print("\n" + "=" * 92)
+    print("INDIVIDUAL ALPHA FREQUENCY (1/f-corrected peak in 7-13 Hz over posterior channels)")
+    print("=" * 92)
     print(f"{'Subject':<10} {'IAF (Hz)':>10} {'IAF-CoM (Hz)':>14} "
-          f"{'Peak power':>14} {'Band used (Hz)':>18}")
+          f"{'raw-peak diag':>14} {'1/f slope':>11} {'Band used (Hz)':>18}")
     for sub, info in iaf_per_sub.items():
         band = (max(info["iaf_hz"] - IAF_HALF_BAND, 4.0),
                 info["iaf_hz"] + IAF_HALF_BAND)
         print(f"{sub:<10} {info['iaf_hz']:>10.2f} {info['iaf_com_hz']:>14.2f} "
-              f"{info['peak_power']:>14.2e} {band[0]:>5.1f} - {band[1]:.1f}")
+              f"{info.get('iaf_raw_peak_hz', float('nan')):>14.2f} "
+              f"{info.get('aperiodic_slope', float('nan')):>+11.3f} "
+              f"{band[0]:>5.1f} - {band[1]:.1f}")
 
     print("\n" + "=" * 96)
     print("LAG SWEEP — IAF-BAND alpha-BOLD coupling at lags 3-11 TR")
