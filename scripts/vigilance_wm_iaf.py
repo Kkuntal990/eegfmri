@@ -244,8 +244,12 @@ def main():
         raw = next(iter(raws.values()))
         info = compute_iaf(raw, POSTERIOR_CHS)
         iaf_per_sub[sub] = info
-        log.info("  sub-%s IAF = %.2f Hz (centre-of-mass = %.2f Hz, peak power = %.2g)",
-                 sub, info["iaf_hz"], info["iaf_com_hz"], info["peak_power"])
+        log.info("  sub-%s IAF = %.2f Hz (centre-of-mass = %.2f Hz, "
+                 "periodic peak power = %.2g, raw-peak diag = %.2f Hz, 1/f slope = %+.3f)",
+                 sub, info["iaf_hz"], info["iaf_com_hz"],
+                 info.get("peak_periodic_power", float("nan")),
+                 info.get("iaf_raw_peak_hz", float("nan")),
+                 info.get("aperiodic_slope", float("nan")))
     (args.output_dir / "iaf_per_subject.json").write_text(
         json.dumps(iaf_per_sub, indent=2)
     )
