@@ -291,6 +291,7 @@ def summarise(all_trials: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, lis
             "rt_load5_s": float(l5_correct_rt.mean()) if len(l5_correct_rt) else np.nan,
             "rt_decrement_s": float(l5_correct_rt.mean() - l1_correct_rt.mean())
                               if len(l1_correct_rt) and len(l5_correct_rt) else np.nan,
+            # Old (broken) within-trial baseline metrics, kept for diagnostic.
             "alpha_desync_load1": float((l1["alpha_encode"] - l1["alpha_baseline"]).mean())
                                   if len(l1) else np.nan,
             "alpha_desync_load5": float((l5["alpha_encode"] - l5["alpha_baseline"]).mean())
@@ -299,6 +300,20 @@ def summarise(all_trials: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, lis
                                  if len(l1) else np.nan,
             "theta_maint_load5": float((l5["theta_maintain"] - l5["theta_baseline"]).mean())
                                  if len(l5) else np.nan,
+            # New direct power-comparison metrics: no baseline needed; pre-target
+            # baseline was contaminated by back-to-back Sternberg trials.
+            "alpha_encode_load1_raw": float(l1["alpha_encode"].mean()) if len(l1) else np.nan,
+            "alpha_encode_load5_raw": float(l5["alpha_encode"].mean()) if len(l5) else np.nan,
+            "alpha_load_contrast": (
+                float(l5["alpha_encode"].mean() - l1["alpha_encode"].mean())
+                if len(l1) and len(l5) else np.nan
+            ),
+            "theta_maintain_load1_raw": float(l1["theta_maintain"].mean()) if len(l1) else np.nan,
+            "theta_maintain_load5_raw": float(l5["theta_maintain"].mean()) if len(l5) else np.nan,
+            "theta_load_contrast": (
+                float(l5["theta_maintain"].mean() - l1["theta_maintain"].mean())
+                if len(l1) and len(l5) else np.nan
+            ),
         }
         # Pooled-across-runs vigilance x RT (using engaged-window alpha).
         a, r = g["alpha_engaged"].to_numpy(), g["rt_s"].to_numpy()
@@ -391,24 +406,36 @@ def main():
               f"{r['rt_decrement_s']:>+10.3f}")
 
     print("\n" + "=" * 92)
-    print("ANALYSIS 2 — Alpha desynchronisation (log alpha_encode / alpha_baseline)")
-    print("Canonical: more negative under load5 = more engagement.")
+    print("ANALYSIS 2 — Alpha desynchronisation (DIRECT load5 vs load1, no baseline)")
+    print("Canonical: alpha encode_L5 < encode_L1 (more desync under high WM load).")
+    print("Δ should be NEGATIVE.")
     print("=" * 92)
-    print(f"{'Subject':<10} {'desync L1':>12} {'desync L5':>12} {'Δ (L5 - L1)':>14}")
+    print(f"{'Subject':<10} {'α enc L1 (raw)':>15} {'α enc L5 (raw)':>15} {'Δ (L5 - L1)':>14}")
     for _, r in by_subject.iterrows():
-        delta = r["alpha_desync_load5"] - r["alpha_desync_load1"]
-        print(f"{r['subject']:<10} {r['alpha_desync_load1']:>+12.4f} "
-              f"{r['alpha_desync_load5']:>+12.4f} {delta:>+14.4f}")
+        print(f"{r['subject']:<10} {r['alpha_encode_load1_raw']:>+15.4f} "
+              f"{r['alpha_encode_load5_raw']:>+15.4f} "
+              f"{r['alpha_load_contrast']:>+14.4f}")
 
     print("\n" + "=" * 92)
-    print("ANALYSIS 3 — Frontal-midline theta maintenance (log theta_maintain / theta_baseline)")
-    print("Canonical: more positive under load5 than load1 (Jensen & Tesche 2002).")
+    print("ANALYSIS 3 — Frontal-midline theta maintenance (DIRECT load5 vs load1)")
+    print("Canonical: theta_L5 > theta_L1 (more sustained theta under high load, Jensen 2002).")
+    print("Δ should be POSITIVE.")
     print("=" * 92)
-    print(f"{'Subject':<10} {'theta L1':>12} {'theta L5':>12} {'Δ (L5 - L1)':>14}")
+    print(f"{'Subject':<10} {'θ maint L1 (raw)':>17} {'θ maint L5 (raw)':>17} {'Δ (L5 - L1)':>14}")
     for _, r in by_subject.iterrows():
-        delta = r["theta_maint_load5"] - r["theta_maint_load1"]
-        print(f"{r['subject']:<10} {r['theta_maint_load1']:>+12.4f} "
-              f"{r['theta_maint_load5']:>+12.4f} {delta:>+14.4f}")
+        print(f"{r['subject']:<10} {r['theta_maintain_load1_raw']:>+17.4f} "
+              f"{r['theta_maintain_load5_raw']:>+17.4f} "
+              f"{r['theta_load_contrast']:>+14.4f}")
+
+    print("\n" + "=" * 92)
+    print("ANALYSIS 2b / 3b — diagnostic only: old broken metrics (contaminated baseline)")
+    print("=" * 92)
+    print(f"{'Subject':<10} {'α desync L1':>12} {'α desync L5':>12} "
+          f"{'θ maint L1':>12} {'θ maint L5':>12}")
+    for _, r in by_subject.iterrows():
+        print(f"{r['subject']:<10} {r['alpha_desync_load1']:>+12.4f} "
+              f"{r['alpha_desync_load5']:>+12.4f} "
+              f"{r['theta_maint_load1']:>+12.4f} {r['theta_maint_load5']:>+12.4f}")
 
     print("\n" + "=" * 92)
     print("ANALYSIS 4 — Trial-level alpha-BOLD coupling, split by load")
