@@ -64,7 +64,8 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
 
 TR = 1.0
-HRF_LAG_TR = 5
+HRF_LAG_TR = 5                    # default lag for engaged-window BOLD
+HRF_LAGS_TO_TEST = [3, 5, 7, 9, 11]   # Bridwell-2025 lag-shift test
 ALPHA_BAND = (8.0, 12.0)
 THETA_BAND = (4.0, 7.0)
 HIGHPASS_HZ = 0.01
@@ -218,10 +219,12 @@ def run_one(sub: str, run_id: str, bids_root: Path,
         th_base = window_mean(theta_ts, eeg_sf,
                               onset + WIN_BASELINE[0], onset + WIN_BASELINE[1])
         th_maint = window_mean(theta_ts, eeg_sf, enc_end, engaged_end)
-        # BOLD V1 window (HRF-lagged engaged interval).
-        bold_eng = tr_window_mean(v1_ts,
-                                  onset + HRF_LAG_TR, engaged_end + HRF_LAG_TR)
-        rows.append({
+        # BOLD V1 windows at several HRF lags (Bridwell-2025 lag-shift test).
+        bold_eng_by_lag = {
+            lag: tr_window_mean(v1_ts, onset + lag, engaged_end + lag)
+            for lag in HRF_LAGS_TO_TEST
+        }
+        row = {
             "subject": sub, "run": run_id,
             "onset_s": onset, "load": int(t["load"]),
             "accuracy": float(t["accuracy"]) if np.isfinite(t["accuracy"]) else np.nan,
@@ -232,8 +235,12 @@ def run_one(sub: str, run_id: str, bids_root: Path,
             "alpha_engaged": a_eng,
             "theta_baseline": th_base,
             "theta_maintain": th_maint,
-            "bold_v1_engaged": bold_eng,
-        })
+            # Default lag (kept for backwards compatibility with downstream code).
+            "bold_v1_engaged": bold_eng_by_lag[HRF_LAG_TR],
+        }
+        for lag, v in bold_eng_by_lag.items():
+            row[f"bold_v1_engaged_lag{lag}"] = v
+        rows.append(row)
 
     df = pd.DataFrame(rows)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -245,6 +252,28 @@ def run_one(sub: str, run_id: str, bids_root: Path,
 # ---------------------------------------------------------------------------
 # Aggregation
 # ---------------------------------------------------------------------------
+
+def lag_sweep(all_trials: pd.DataFrame) -> pd.DataFrame:
+    """Bridwell-2025 lag-shift test: trial-level alpha-BOLD r at each HRF lag,
+    per (subject, load). If the sign flips across lags, the inverted coupling
+    might be a lag artefact; if it stays the same sign at all lags, it is a
+    true sign reversal.
+    """
+    rows = []
+    for (sub, load), g in all_trials.groupby(["subject", "load"]):
+        a = g["alpha_engaged"].to_numpy()
+        d = {"subject": sub, "load": int(load), "n_trials": len(g)}
+        for lag in HRF_LAGS_TO_TEST:
+            b = g[f"bold_v1_engaged_lag{lag}"].to_numpy()
+            m = np.isfinite(a) & np.isfinite(b)
+            d[f"r_lag{lag}"] = (
+                float(np.corrcoef(a[m], b[m])[0, 1])
+                if m.sum() >= 3 and a[m].std() > 0 and b[m].std() > 0
+                else float("nan")
+            )
+        rows.append(d)
+    return pd.DataFrame(rows)
+
 
 def summarise(all_trials: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, list[dict]]:
     """Build per-(sub,load) summary, per-subject pooled summary, and per-subject load contrasts."""
@@ -385,6 +414,9 @@ def main():
     per_load, by_subject, summary_struct = summarise(trials_df)
     per_load.to_csv(args.output_dir / "summary.csv", index=False)
     by_subject.to_csv(args.output_dir / "by_subject.csv", index=False)
+    lag_df = lag_sweep(trials_df)
+    lag_df.to_csv(args.output_dir / "lag_sweep.csv", index=False)
+    summary_struct["lag_sweep"] = lag_df.to_dict(orient="records")
     (args.output_dir / "summary.json").write_text(
         json.dumps(summary_struct, indent=2)
     )
@@ -454,6 +486,23 @@ def main():
     for _, r in by_subject.iterrows():
         print(f"{r['subject']:<10} {r['vigilance_rt_n']:>9} "
               f"{r['vigilance_rt_pearson_r']:>+14.3f}")
+
+    print("\n" + "=" * 92)
+    print("BRIDWELL-2025 LAG-SHIFT TEST — Analysis 4 r at multiple HRF lags")
+    print("If sub-1070302's positive r is just lag-shifted negative coupling, it")
+    print("should flip sign as we move to longer lags. If it stays positive at")
+    print("all lags, the sign reversal is robust (true vigilance-phenotype sign-flip).")
+    print("=" * 92)
+    lag_cols = [c for c in lag_df.columns if c.startswith("r_lag")]
+    print(f"{'Subject':<10} {'load':>5} {'n trials':>9} "
+          + " ".join(f"{c:>8}" for c in lag_cols))
+    for _, r in lag_df.iterrows():
+        vals = " ".join(f"{r[c]:>+8.3f}" for c in lag_cols)
+        print(f"{r['subject']:<10} {int(r['load']):>5} {r['n_trials']:>9} {vals}")
+    print("=" * 92)
+    print("Interpretation:")
+    print("  TRUE sign-flip:  sub-1070302 row stays positive at all lags 3-11.")
+    print("  Lag-shift artefact (Bridwell): sub-1070302 flips negative at some lag.")
 
     print("\n" + "=" * 92)
     print("Headline prediction: vigilance-vulnerable subject (sub-1070302) shows")
