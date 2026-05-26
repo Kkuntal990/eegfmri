@@ -103,16 +103,27 @@ def compute_iaf(raw, chs: list[str]) -> dict:
     if not len(band_periodic) or band_periodic.sum() == 0:
         return {"iaf_hz": float("nan"), "channels_used": picks}
     peak_idx = int(np.argmax(band_periodic))
-    iaf = float(band_freqs[peak_idx])
+    iaf_peak = float(band_freqs[peak_idx])
     com = float((band_freqs * band_periodic).sum() / band_periodic.sum())
-    # Also return the raw-PSD peak for diagnostic (this was the buggy
-    # value before the 1/f correction was added).
     raw_peak_idx = int(np.argmax(band_raw_power))
     raw_peak_iaf = float(band_freqs[raw_peak_idx])
+
+    # Primary IAF estimate: use centre-of-mass when the periodic-residual
+    # peak still pins at the search-range boundary (a sign the spectrum is
+    # monotonically decreasing through alpha and argmax is unreliable).
+    # See Corcoran et al. 2018 Psychophysiology -- CoM is the standard
+    # fallback when peak detection is degenerate. Otherwise prefer the peak.
+    boundary_pin = (
+        iaf_peak == band_freqs[0] or iaf_peak == band_freqs[-1]
+    )
+    primary_iaf = com if boundary_pin else iaf_peak
+
     return {
-        "iaf_hz": iaf,                         # 1/f-corrected peak (primary)
+        "iaf_hz": float(primary_iaf),          # primary IAF estimate
+        "iaf_peak_hz": iaf_peak,               # 1/f-corrected peak (raw argmax of residual)
         "iaf_com_hz": com,                     # 1/f-corrected centre-of-mass
-        "iaf_raw_peak_hz": raw_peak_iaf,       # diagnostic: pre-correction peak
+        "iaf_raw_peak_hz": raw_peak_iaf,       # diagnostic: pre-1/f peak
+        "boundary_pin_fallback_to_com": bool(boundary_pin),
         "peak_periodic_power": float(band_periodic[peak_idx]),
         "aperiodic_slope": float(slope),
         "channels_used": picks,
